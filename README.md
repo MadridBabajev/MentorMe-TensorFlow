@@ -1,93 +1,385 @@
-# ML Conversion
+# MentorMe TensorFlow
 
+This repository contains the **Python/TensorFlow tooling** used to train/fine-tune and convert the two MentorMe AI models:
 
+- **OCR (handwritten text recognition)** — CRNN + CTC loss (TensorFlow/Keras)
+- **Summarization** — fine-tuned **T5** (Hugging Face Transformers + TensorFlow)
 
-## Getting started
+The scripts here are meant to produce deployment-ready artifacts for different MentorMe applications (backend, web, mobile):
+**Keras → SavedModel / TF Lite / TF.js**.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+> ⚠️ Most scripts currently use **hard-coded paths** (e.g. `/mnt/c/...` from WSL).
+> Before running anything, update the `*_PATH`, `INPUT_MODEL`, `OUTPUT_DIR`, `LINES_FILE`, etc. constants at the top of each script.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+---
 
-## Add your files
+## Table of Contents
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+- [Repository contents](#repository-contents)
+- [Model formats](#model-formats)
+- [Setup](#setup)
+- [Training](#training)
+    - [Train OCR model](#train-ocr-model)
+    - [Fine-tune summarization model](#fine-tune-summarization-model)
+- [Testing / benchmarking](#testing--benchmarking)
+- [Model conversion](#model-conversion)
+    - [OCR conversions](#ocr-conversions)
+    - [Summarization conversions](#summarization-conversions)
+- [Integration notes](#integration-notes)
+- [Troubleshooting](#troubleshooting)
+- [Author](#author)
+
+---
+
+## Repository contents
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.cs.taltech.ee/mababa/ml-model-conversion.git
-git branch -M main
-git push -uf origin main
+.
+├─ ocr_training/
+│  ├─ train_ocr.py              # train CRNN OCR model + checkpoints
+│  ├─ test.py                   # measure OCR inference metrics + CSV output
+│  ├─ ocr_dataset.py            # IAM-like dataset loader + preprocessing
+│  ├─ ocr_model.py              # CRNN model definition + CTC loss
+│  └─ utils.py                  # vocabulary extraction + CTC decoding helpers
+│
+├─ summarization_training/
+│  ├─ train_summarizer.py       # fine-tune T5 (TF) + save_pretrained()
+│  └─ test.py                   # measure summarizer inference + ROUGE + CSV output
+│
+└─ model_conversion/
+   ├─ saved_model/
+   │  ├─ ocr_to_saved_model.py  # Keras .h5 → SavedModel directory
+   │  ├─ t5_to_saved_model.py   # HF TF model → SavedModel with custom signature
+   │  ├─ check_model_signature.py
+   │  └─ test_t5.py             # quick SavedModel inference sanity check (T5)
+   │
+   ├─ tflite/
+   │  ├─ ocr_to_tflite.py       # Keras .h5 → .tflite (float16 quantization)
+   │  ├─ t5_to_tflite.py        # SavedModel → .tflite
+   │  └─ test_t5.py             # quick TFLite inference sanity check (T5)
+   │
+   ├─ tfjs/
+   │  ├─ ocr_to_tfjs.py         # Keras .h5 → TF.js layers model
+   │  └─ t5_to_tfjs.py          # HF TF model → SavedModel → TF.js graph model
+   │
+   └─ utils/
+      ├─ dataset.py
+      ├─ ocr_model_structure.py
+      ├─ representative_dataset_ocr.py
+      └─ utils.py
 ```
 
-## Integrate with your tools
+---
 
-- [ ] [Set up project integrations](https://gitlab.cs.taltech.ee/mababa/ml-model-conversion/-/settings/integrations)
+## Model formats
 
-## Collaborate with your team
+This repo uses **multiple output formats**, depending on where the model must run:
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+| Format                                         | What it is                    | Typical use                                                     |
+|------------------------------------------------|-------------------------------|-----------------------------------------------------------------|
+| **Keras** (`.h5` / `.keras`)                   | Simple TF/Keras serialization | training checkpoints, research runs                             |
+| **SavedModel** (folder with `.pb` + variables) | Native TF deployment format   | TF Serving, server-side integration, base for other conversions |
+| **TF Lite** (`.tflite`)                        | Mobile/edge format            | Flutter / Android / iOS on-device inference                     |
+| **TF.js** (`model.json` + `.bin` shards)       | Browser format                | Web inference                                                   |
 
-## Test and Deploy
+> **Tokenizer artifacts matter:** the T5 summarization model requires a tokenizer directory (e.g. `config.json`, tokenizer files).
 
-Use the built-in continuous integration in GitLab.
+---
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+## Setup
 
-***
+### Prerequisites
 
-# Editing this README
+- Python (recommended: **3.10**)
+- TensorFlow (many scripts were developed with **TF 2.x** and use legacy Keras compatibility)
+- Optional:
+    - NVIDIA GPU + CUDA/WSL2 for faster training/conversion
+    - On Windows without CUDA, you can try DirectML support
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+### Create and activate a virtual environment
 
-## Suggestions for a good README
+**Linux / macOS / WSL2**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+### Install dependencies
 
-## Name
-Choose a self-explaining name for your project.
+```bash
+pip install "tensorflow==2.*" transformers datasets evaluate sentencepiece opencv-python psutil gputil tensorflowjs
+```
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Notes:
+- `tensorflowjs` provides the `tensorflowjs_converter` CLI used by `conversion-src/tfjs/ocr_to_tfjs.py`.
+- If you encounter Keras 3 / legacy-Keras issues, see [Troubleshooting](#troubleshooting).
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+### Quick environment checks
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+python --version
+python -c "import tensorflow as tf; print(tf.__version__); print(tf.config.list_physical_devices('GPU'))"
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+GPU (optional, but recommended):
+```bash
+nvidia-smi
+nvcc --version
+```
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+---
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+## Training
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+### Train OCR model
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+**Script:** `ocr_training/src/train_ocr.py`
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+What it does:
+- Builds a **CRNN** model (CNN → BiLSTM → logits)
+- Uses **CTC loss** for alignment-free sequence learning
+- Saves checkpoints to `./ocr_checkpoints`
+- Saves the final model to a `.h5` file
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+#### 1) Configure paths
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+At the top of `ocr_training/src/train_ocr.py`, update:
+- `lines_file` → path to `sentences.txt` (IAM-style metadata)
+- `base_dir` → root folder containing the images referenced by the metadata
+- `new_model_name` → output `.h5` filename
+- `checkpoint_dir` → checkpoints output folder
 
-## License
-For open source projects, say how it is licensed.
+#### 2) Run training
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Run from **inside** `ocr_training/src` so local imports resolve:
+
+```bash
+cd ocr-src
+python -u train_ocr.py
+```
+
+Logging (Linux/WSL2):
+```bash
+python -u train_ocr.py | tee ocr_training_log.txt
+```
+
+---
+
+### Fine-tune summarization model
+
+**Script:** `summarization_fine_tuning/src/train_summarizer.py`
+
+What it does:
+- Loads **T5** (`t5-base` by default)
+- Fine-tunes on the **WikiSum** dataset via `datasets`
+- Writes TensorBoard logs to `./logs`
+- Saves the fine-tuned model + tokenizer using `save_pretrained()` to:
+    - `./fine_tuned_summarizer_v2.keras` (folder)
+
+Run from inside `summarization_fine_tuning/src`:
+
+```bash
+cd sum-src
+python -u train_summarizer.py
+```
+
+TensorBoard:
+```bash
+tensorboard --logdir ./logs
+```
+
+---
+
+## Testing / benchmarking
+
+### OCR benchmark
+
+**Script:** `ocr_training/src/test.py`
+
+Update config constants at the top:
+- `MODEL_PATH`, `LINES_FILE`, `BASE_DIR`, etc.
+
+Run:
+```bash
+cd ocr-src
+python -u test.py
+```
+
+Outputs:
+- prints load time, inference time, CPU/RAM usage
+- writes `inference_metrics.csv`
+
+### Summarizer benchmark
+
+**Script:** `summarization_fine_tuning/src/test.py`
+
+Update config constants at the top:
+- `MODEL_PATH` (tokenizer + model directory)
+- `TEXT` and `REFERENCE_SUMMARY`
+
+Run:
+```bash
+cd sum-src
+python -u test.py
+```
+
+Outputs:
+- prints load time, inference time, CPU/RAM/GPU usage
+- prints ROUGE metrics
+- writes `summarizer_metrics.csv`
+
+---
+
+## Model conversion
+
+> ✅ Tip: keep a consistent local folder layout, for example:
+>
+> ```
+> models/
+>   input/
+>     ocr_model.h5
+>     summarizer/
+>   output/
+>     saved_model/
+>     tflite/
+>     tfjs/
+> ```
+>
+> Then update the `INPUT_MODEL`, `MODEL_DIR`, `OUTPUT_DIR`, etc. constants in each script.
+
+### OCR conversions
+
+#### Keras `.h5` → SavedModel
+
+```bash
+python model_coversion/src/saved_model/ocr_to_saved_model.py
+```
+
+#### Keras `.h5` → TF Lite (`.tflite`)
+
+This script uses:
+- `Optimize.DEFAULT`
+- `float16` post-training quantization
+- a representative dataset generator for calibration
+
+```bash
+python conversion-src/tflite/ocr_to_tflite.py
+```
+
+#### Keras `.h5` → TF.js (layers model)
+
+Uses the `tensorflowjs_converter` CLI:
+
+```bash
+python model_coversion/src/tfjs/ocr_to_tfjs.py
+```
+
+Outputs:
+- `model.json`
+- one or more weight shard files (`.bin`)
+
+---
+
+### Summarization conversions
+
+#### HF TF model → SavedModel (custom signature)
+
+T5 is wrapped in a `tf.Module` to export a stable serving signature that includes decoder inputs.
+
+```bash
+python conversion-src/saved_model/t5_to_saved_model.py
+```
+
+You can inspect the produced signature:
+
+```bash
+python conversion-src/saved_model/check_model_signature.py
+```
+
+#### SavedModel → TF Lite
+
+```bash
+python conversion-src/tflite/t5_to_tflite.py
+```
+
+#### HF TF model → TF.js (graph model)
+
+This script:
+1) wraps T5 in a `tf.Module`
+2) exports a SavedModel
+3) converts it to TF.js artifacts
+
+```bash
+python conversion-src/tfjs/t5_to_tfjs.py
+```
+
+---
+
+## Integration notes
+
+### Backend / server-side (SavedModel)
+
+SavedModel is the most stable “server-friendly” artifact:
+- Use it for TensorFlow Serving, Python inference services, or server-side integration libraries.
+- Keep tokenizers (T5) and post-processing (CTC decode) close to the model.
+
+### React (TF.js)
+
+- OCR export (`tfjs_layers_model`) is typically loaded with `tf.loadLayersModel()`.
+- T5 TF.js export is produced via SavedModel conversion and is typically loaded as a graph model (`tf.loadGraphModel()`).
+
+> Real-world T5 summarization fully in-browser is often heavy (model size + iterative decoding).
+> Consider server-side summarization or smaller distilled models if you need web inference.
+
+### Flutter (TF Lite)
+
+- OCR `.tflite` is suitable for on-device inference, but you still need:
+    - the same image preprocessing (resize/pad/normalize)
+    - a CTC decoding implementation
+- T5 `.tflite` may be too large/slow for many mobile devices; measure before committing.
+
+---
+
+## Troubleshooting
+
+### Keras 3 vs legacy Keras
+
+Several scripts set:
+```python
+os.environ["TF_USE_LEGACY_KERAS"] = "True"
+```
+
+If you see errors related to `keras` vs `tf.keras`, keep this enabled, and prefer TensorFlow 2.x.
+
+### TF Lite converter issues
+
+If TF Lite conversion fails in your current environment:
+- try **Python 3.10** and a stable TF 2.x version
+- keep the conversion environment separate from your training environment if needed
+
+### Windows / WSL utility commands (from the original dev notes)
+
+Check TF and GPU:
+```bash
+python --version
+pip freeze | grep -E "tensorflow"
+nvcc --version
+nvidia-smi
+```
+
+DirectML (Windows GPU without CUDA):
+```bash
+pip install tensorflow-directml-plugin
+```
+
+Reinstall TF (example pattern):
+```bash
+pip cache purge
+pip uninstall -y tensorflow tensorflow-cpu tensorflow-intel tensorflow-estimator tensorflow-io-gcs-filesystem
+pip install --upgrade --force-reinstall "tensorflow==2.12.*"
+```
+
+---
+
+_Madrid Babajev (08.02.2026)_
