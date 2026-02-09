@@ -368,11 +368,6 @@ nvcc --version
 nvidia-smi
 ```
 
-DirectML (Windows GPU without CUDA):
-```bash
-pip install tensorflow-directml-plugin
-```
-
 Reinstall TF (example pattern):
 ```bash
 pip cache purge
